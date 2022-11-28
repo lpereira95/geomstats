@@ -665,3 +665,18 @@ class LieGroup(Manifold, abc.ABC):
         tangent_vec_at_id = self.compose(self.inverse(base_point), vector)
         regularized = self.lie_algebra.projection(tangent_vec_at_id)
         return self.compose(base_point, regularized)
+
+    def regularize(self, point):
+        """Regularize a point to the canonical representation for the manifold.
+
+        Parameters
+        ----------
+        point : array-like, shape=[..., dim]
+            Point.
+
+        Returns
+        -------
+        regularized_point : array-like, shape=[..., *point_shape]
+            Regularized point.
+        """
+        return gs.copy(point)

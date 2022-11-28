@@ -130,22 +130,6 @@ class Manifold(abc.ABC):
             Points sampled on the manifold.
         """
 
-    def regularize(self, point):
-        """Regularize a point to the canonical representation for the manifold.
-
-        Parameters
-        ----------
-        point : array-like, shape=[..., dim]
-            Point.
-
-        Returns
-        -------
-        regularized_point : array-like, shape=[..., *point_shape]
-            Regularized point.
-        """
-        regularized_point = point
-        return regularized_point
-
     @property
     def metric(self):
         """Riemannian Metric associated to the Manifold."""

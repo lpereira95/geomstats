@@ -356,24 +356,6 @@ class ProductManifold(Manifold):
         belongs = self._iterate_over_factors("belongs", {"point": point, "atol": atol})
         return belongs
 
-    def regularize(self, point):
-        """Regularize the point into the manifold's canonical representation.
-
-        Parameters
-        ----------
-        point : array-like, shape=[..., {dim, embedding_space.dim,
-            [n_manifolds, dim_each]}]
-            Point to be regularized.
-
-        Returns
-        -------
-        regularized_point : array-like, shape=[..., {dim, embedding_space.dim,
-            [n_manifolds, dim_each]}]
-            Point in the manifold's canonical representation.
-        """
-        regularized_point = self._iterate_over_factors("regularize", {"point": point})
-        return regularized_point
-
     def random_point(self, n_samples=1, bound=1.0):
         """Sample in the product space from the product distribution.
 
