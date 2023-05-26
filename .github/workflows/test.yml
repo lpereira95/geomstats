@@ -55,8 +55,16 @@ jobs:
       - name: unit testing [pytest]
         env:
           GEOMSTATS_BACKEND: ${{matrix.geomstats-backend}}
+        if : ${{matrix.test-folder == 'tests/tests_geomstats/'}}
         run: |
           pytest --cov-report term --cov=geomstats ${{matrix.test-folder}}
+
+      - name: unit testing [pytest]
+        env:
+          GEOMSTATS_BACKEND: ${{matrix.geomstats-backend}}         
+        if : ${{matrix.test-folder == 'tests/tests_scripts'}}
+        run: |
+          pytest ${{matrix.test-folder}}
 
       - name: uploading code coverage [codecov]
         if: ${{matrix.python-version == 3.11 && matrix.test-folder == 'tests/tests_geomstats/'}}
