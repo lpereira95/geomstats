@@ -7,7 +7,10 @@ import geomstats.backend as gs
 from geomstats.geometry.base import OpenSet
 from geomstats.geometry.lower_triangular_matrices import LowerTriangularMatrices
 from geomstats.geometry.matrices import Matrices
+from geomstats.geometry.open_hemisphere import ProductOpenHemispheres
+from geomstats.geometry.pullback_metric import PullbackDiffeoMetric
 from geomstats.geometry.riemannian_metric import RiemannianMetric
+from geomstats.vectorization import check_is_batch
 
 
 class PositiveLowerTriangularMatrices(OpenSet):
@@ -41,26 +44,6 @@ class PositiveLowerTriangularMatrices(OpenSet):
         """Metric to equip the space with if equip is True."""
         return CholeskyMetric
 
-    def random_point(self, n_samples=1, bound=1.0):
-        """Sample from the manifold.
-
-        Parameters
-        ----------
-        n_samples : int
-            Number of samples.
-            Optional, default: 1.
-        bound : float
-            Side of hypercube support.
-            Optional, default: 1.0
-
-        Returns
-        -------
-        point : array-like, shape=[..., n, n]
-           Sample.
-        """
-        sample = super().random_point(n_samples, bound)
-        return self.projection(sample)
-
     def belongs(self, point, atol=gs.atol):
         """Check if mat is lower triangular with >0 diagonal.
 
@@ -83,24 +66,20 @@ class PositiveLowerTriangularMatrices(OpenSet):
         return gs.logical_and(is_lower_triangular, is_positive)
 
     def projection(self, point):
-        """Project a matrix to the Cholesksy space.
-
-        First it is projected to space lower triangular matrices
-        and then diagonal elements are exponentiated to make it positive.
+        """Project a matrix to the PLT space.
 
         Parameters
         ----------
         point : array-like, shape=[..., n, n]
-            Matrix to project.
 
         Returns
         -------
         projected: array-like, shape=[..., n, n]
-            SPD matrix.
         """
-        vec_diag = gs.abs(Matrices.diagonal(point) - 0.1) + 0.1
+        vec_diag = gs.abs(Matrices.diagonal(point))
+        vec_diag = gs.where(vec_diag < gs.atol, gs.atol, vec_diag)
         diag = gs.vec_to_diag(vec_diag)
-        strictly_lower_triangular = Matrices.to_lower_triangular(point)
+        strictly_lower_triangular = gs.tril(point, k=-1)
         return diag + strictly_lower_triangular
 
 
@@ -274,3 +253,166 @@ class CholeskyMetric(RiemannianMetric):
         sl_diff = sl_a - sl_b
         squared_dist_sl = Matrices.frobenius_product(sl_diff, sl_diff)
         return squared_dist_sl + squared_dist_diag
+
+
+class UnitNormedPLTMatrices(OpenSet):
+    """Space of positive lower triangular matrices with unit-normed rows.
+
+    Rows are unit normed for the Euclidean norm.
+    """
+
+    # TODO: notice is is not an OpenSet of a vector space
+
+    def __init__(self, n, equip=True):
+        super().__init__(
+            dim=int(n * (n + 1) / 2),
+            embedding_space=PositiveLowerTriangularMatrices(n),
+            equip=equip,
+        )
+        self.n = n
+
+    @staticmethod
+    def default_metric():
+        """Metric to equip the space with if equip is True."""
+        return UnitNormedPLTMatricesPullbackMetric
+
+    def belongs(self, point, atol=gs.atol):
+        """Check if a point belongs to the unit normed plt matrices."""
+        is_plt = self.embedding_space.belongs(point)
+        row_norms = gs.linalg.norm(point, axis=-1)
+        is_unit_normed = gs.logical_and(
+            gs.all(row_norms < 1.0 + atol, axis=-1),
+            gs.all(1.0 - atol < row_norms, axis=-1),
+        )
+        return gs.logical_and(is_plt, is_unit_normed)
+
+    def projection(self, point):
+        """Project a point on the unit normed plt matrices.
+
+        It is the same as the projection on the sphere.
+
+        Parameters
+        ----------
+        point : array-like, shape=[..., dim]
+            Point in embedding plt space.
+
+        Returns
+        -------
+        projected_point : array-like, shape=[..., dim]
+            Point projected on the open unit normed plt matrices.
+        """
+        point = self.embedding_space.projection(point)
+        norm = gs.linalg.norm(point, axis=-1)
+        return gs.einsum("...,...i->...i", 1.0 / norm, point)
+
+    # def to_tangent(self, vector, base_point=None):
+    #     # this is completely stupid but if not there the to_tangent method doesn't project well
+    #     """Project a vector to a tangent space of the vector space.
+
+    #     This method is for compatibility and returns vector.
+
+    #     Parameters
+    #     ----------
+    #     vector : array-like, shape=[..., *point_shape]
+    #         Vector.
+    #     base_point : array-like, shape=[..., *point_shape]
+    #         Point in the vector space
+
+    #     Returns
+    #     -------
+    #     tangent_vec : array-like, shape=[..., *point_shape]
+    #         Tangent vector at base point.
+    #     """
+    #     tangent_vec = self.projection(vector)
+    #     if base_point is not None and base_point.ndim > vector.ndim:
+    #         return gs.broadcast_to(tangent_vec, base_point.shape)
+    #     return tangent_vec
+
+    def is_tangent(self, vector, base_point, atol=gs.atol):
+        """Check whether the vector is tangent at base_point.
+
+        Parameters
+        ----------
+        vector : array-like, shape=[..., *point_shape]
+            Vector.
+        base_point : array-like, shape=[..., *point_shape]
+            Point on the manifold.
+        atol : float
+            Absolute tolerance.
+            Optional, default: backend atol.
+
+        Returns
+        -------
+        is_tangent : bool
+            Boolean denoting if vector is a tangent vector at the base point.
+        """
+        return self.embedding_space.is_tangent(vector, base_point, atol)
+
+    def to_tangent(self, vector, base_point):
+        """Project a vector to a tangent space of the manifold.
+
+        Parameters
+        ----------
+        vector : array-like, shape=[..., *point_shape]
+            Vector.
+        base_point : array-like, shape=[..., *point_shape]
+            Point on the manifold.
+
+        Returns
+        -------
+        tangent_vec : array-like, shape=[..., *point_shape]
+            Tangent vector at base point.
+        """
+        return self.embedding_space.to_tangent(vector, base_point)
+
+
+class UnitNormedPLTMatricesPullbackMetric(PullbackDiffeoMetric):
+    def _define_embedding_space(self):
+        return ProductOpenHemispheres(self._space.embedding_space.n, equip=True)
+
+    def diffeomorphism(self, base_point):
+        return gs.concatenate(
+            [
+                gs.flip(base_point[..., i, : i + 1], axis=-1)
+                for i in range(1, self._space.n)
+            ],
+            axis=-1,
+        )
+
+    def inverse_diffeomorphism(self, image_point):
+        def _inverse_diffeomorphism_single(image_point):
+            image_point_ = []
+            i = 0
+            for row in range(1, n):
+                image_point_.append(gs.flip(image_point[i : i + (row + 1)]))
+                i += row + 1
+
+            image_point_ = gs.hstack(image_point_)
+
+            return gs.array_from_sparse(
+                indices,
+                gs.hstack([gs.array([1.0]), image_point_]),
+                (
+                    n,
+                    n,
+                ),
+            )
+
+        n = self._space.n
+        indices = [(index_0, index_1) for index_0, index_1 in zip(*gs.tril_indices(n))]
+        if check_is_batch(self.embedding_space, image_point):
+            return gs.stack(
+                [
+                    _inverse_diffeomorphism_single(image_point_)
+                    for image_point_ in image_point
+                ]
+            )
+        return _inverse_diffeomorphism_single(image_point)
+
+    def tangent_diffeomorphism(self, tangent_vec, base_point):
+        # the diffeo is linear, so its pushforward is itself
+        return self.diffeomorphism(tangent_vec)
+
+    def inverse_tangent_diffeomorphism(self, image_tangent_vec, image_point):
+        # same for the inverse diffeo
+        return self.inverse_diffeomorphism(image_point=image_tangent_vec)
