@@ -9,7 +9,11 @@ from geomstats.geometry.fiber_bundle import FiberBundle
 from geomstats.geometry.general_linear import GeneralLinear
 from geomstats.geometry.matrices import Matrices
 from geomstats.geometry.quotient_metric import QuotientMetric
-from geomstats.geometry.spd_matrices import SPDAffineMetric, SPDMatrices
+from geomstats.geometry.spd_matrices import (
+    LieCholeskyMetric,
+    SPDAffineMetric,
+    SPDMatrices,
+)
 
 
 class FullRankCorrelationMatrices(LevelSet):
@@ -162,11 +166,12 @@ class FullRankCorrelationMatrices(LevelSet):
         return sym * mask_diag
 
 
-class CorrelationMatricesBundle(FiberBundle):
+class CorrelationMatricesAffineBundle(FiberBundle):
     """Fiber bundle to construct the quotient metric on correlation matrices.
 
     Correlation matrices are obtained as the quotient of the space of SPD
     matrices by the action by congruence of diagonal matrices.
+    Metric-dependent methods implemented for affine-invariant metric.
 
     References
     ----------
@@ -270,6 +275,208 @@ class CorrelationMatricesBundle(FiberBundle):
         return self.horizontal_projection(lift, base_point=fiber_point)
 
 
+class CorrelationMatricesBundle(FiberBundle):
+    """Fiber bundle to construct the quotient metric on correlation matrices.
+
+    Correlation matrices are obtained as the quotient of the space of SPD
+    matrices by the action by congruence of diagonal matrices.
+    Metric-dependent methods implemented for any total space metric.
+
+    References
+    ----------
+    .. [thanwerdas2022] Yann Thanwerdas. Riemannian and stratified
+    geometries on covariance and correlation matrices. Differential
+    Geometry [math.DG]. Université Côte d'Azur, 2022.
+    """
+
+    def __init__(self, total_space):
+        super().__init__(
+            total_space=total_space,
+            group_dim=total_space.n,
+            group_action=FullRankCorrelationMatrices.diag_action,
+        )
+        self._diagonal_matrices_basis_ = None
+
+    def _generate_diagonal_matrices_basis(self):
+        """Generate basis for diagonal matrices."""
+        n = self.total_space.n
+        indices = [(i, i, i) for i in range(n)]
+        return gs.array_from_sparse(indices, gs.ones(n), (n, n, n))
+
+    @property
+    def _diagonal_matrices_basis(self):
+        """Basis of the diagonal matrices space."""
+        if self._diagonal_matrices_basis_ is None:
+            self._diagonal_matrices_basis_ = self._generate_diagonal_matrices_basis()
+        return self._diagonal_matrices_basis_
+
+    @staticmethod
+    def riemannian_submersion(point):  # correlation map
+        """Compute the correlation matrix associated to an SPD matrix.
+
+        Parameters
+        ----------
+        point : array-like, shape=[..., n, n]
+            SPD matrix.
+
+        Returns
+        -------
+        cor : array_like, shape=[..., n, n]
+            Full rank correlation matrix.
+        """
+        diagonal = Matrices.diagonal(point) ** (-0.5)
+        return point * gs.outer(diagonal, diagonal)
+
+    def tangent_riemannian_submersion(self, tangent_vec, base_point):
+        """Compute the differential of the submersion.
+
+        Parameters
+        ----------
+        tangent_vec : array-like, shape=[..., n, n]
+            Tangent vector.
+        base_point : array-like, shape=[..., n, n]
+            Base point.
+
+        Returns
+        -------
+        result : array-like, shape=[..., n, n]
+        """
+        diagonal_bp = Matrices.diagonal(base_point)
+        diagonal_tv = Matrices.diagonal(tangent_vec)
+
+        diagonal = diagonal_tv / diagonal_bp
+        aux = base_point * (diagonal[..., None, :] + diagonal[..., :, None])
+        mat = tangent_vec - 0.5 * aux
+        return self.group_action(diagonal_bp ** (-0.5), mat)
+
+    def _generate_vertical_space_basis(self, base_point):
+        """Generate basis for vertical space."""
+        basis_list = []
+        for elt in self._diagonal_matrices_basis:
+            X_i = elt @ base_point + base_point @ elt
+            basis_list.append(X_i)
+        vertical_basis = gs.array(basis_list)
+
+        if gs.ndim(vertical_basis) == 4:
+            return gs.moveaxis(vertical_basis, 0, 1)
+
+        return vertical_basis
+
+    def _compute_vertical_space_orthogonal_basis(self, point):
+        """Compute vertical space orthogonal basis.
+
+        Parameters
+        ----------
+        point : array-like, shape=[..., n, n]
+            Point in the total space.
+        """
+        n_o_basis = self._generate_vertical_space_basis(point)
+        return self._gram_schmidt_orthonormalize(basis=n_o_basis, base_point=point)
+
+    def _gram_schmidt_orthonormalize(self, basis, base_point):
+        """Gram-Schmidt orthonormalization vectorized."""
+        if gs.ndim(base_point) == 2:
+            return self._gram_schmidt_orthonormalize_single(basis, base_point)
+
+        return gs.array(
+            [
+                self._gram_schmidt_orthonormalize_single(basis_, base_point_)
+                for basis_, base_point_ in zip(basis, base_point)
+            ]
+        )
+
+    def _gram_schmidt_orthonormalize_single(self, basis, base_point):
+        """Gram-Schmidt orthonormalization for a single base point."""
+        orthonormal_basis = []
+        for vector in basis:
+            for o_vector in orthonormal_basis:
+                num = self.total_space.metric.inner_product(
+                    tangent_vec_a=vector, tangent_vec_b=o_vector, base_point=base_point
+                )
+                dem = self.total_space.metric.inner_product(
+                    tangent_vec_a=o_vector,
+                    tangent_vec_b=o_vector,
+                    base_point=base_point,
+                )
+                projection = num / dem
+                vector -= projection * o_vector
+            squared_norm = self.total_space.metric.inner_product(
+                tangent_vec_a=vector, tangent_vec_b=vector, base_point=base_point
+            )
+            norm = gs.sqrt(squared_norm)
+            orthonormal_basis.append(vector / norm)
+        return gs.array(orthonormal_basis)
+
+    def vertical_projection(self, tangent_vec, base_point):
+        """Compute the vertical projection wrt the total space metric.
+
+        Algorithm is independent of total space metric.
+
+        Parameters
+        ----------
+        tangent_vec : array-like, shape=[..., n, n]
+            Tangent vector.
+        base_point : array-like, shape=[..., n, n]
+            Base point.
+
+        Returns
+        -------
+        ver : array-like, shape=[..., n, n]
+            Vertical projection.
+        """
+
+        def _get_coefficients(o_basis_, tangent_vec_, base_point_):
+            coefficients = []
+            for basis_vector in o_basis_:
+                coefficient = self.total_space.metric.inner_product(
+                    tangent_vec_a=tangent_vec_,
+                    tangent_vec_b=basis_vector,
+                    base_point=base_point_,
+                )
+                coefficients.append(coefficient)
+            return gs.array(coefficients)
+
+        o_basis = self._compute_vertical_space_orthogonal_basis(base_point)
+        if o_basis.ndim == 3:
+            coefficients = _get_coefficients(o_basis, tangent_vec, base_point)
+            return gs.einsum("i...,ijk->...jk", coefficients, o_basis)
+
+        coefficients = gs.stack(
+            [
+                _get_coefficients(o_basis_, tangent_vec_, base_point_)
+                for o_basis_, tangent_vec_, base_point_ in zip(
+                    o_basis, tangent_vec, base_point
+                )
+            ]
+        )
+        return gs.einsum("...i,...ijk->...jk", coefficients, o_basis)
+
+    def horizontal_lift(self, tangent_vec, base_point=None, fiber_point=None):
+        """Compute the horizontal lift wrt the total space metric.
+
+        Parameters
+        ----------
+        tangent_vec : array-like, shape=[..., n, n]
+            Tangent vector of the manifold of full-rank correlation matrices.
+        fiber_point : array-like, shape=[..., n, n]
+            SPD matrix in the fiber above point.
+        base_point : array-like, shape=[..., n, n]
+            Full-rank correlation matrix.
+
+        Returns
+        -------
+        hor_lift : array-like, shape=[..., n, n]
+            Horizontal lift of tangent_vec from point to base_point.
+        """
+        if fiber_point is None and base_point is not None:
+            return self.horizontal_projection(
+                tangent_vec=tangent_vec, base_point=base_point
+            )
+        diagonal_point = Matrices.diagonal(fiber_point) ** 0.5
+        lift = FullRankCorrelationMatrices.diag_action(diagonal_point, tangent_vec)
+        return self.horizontal_projection(tangent_vec=lift, base_point=fiber_point)
+
+
 class FullRankCorrelationAffineQuotientMetric(QuotientMetric):
     """Class for the quotient of the affine-invariant metric.
 
@@ -282,6 +489,20 @@ class FullRankCorrelationAffineQuotientMetric(QuotientMetric):
         if total_space is None:
             total_space = SPDMatrices(space.n, equip=False)
             total_space.equip_with_metric(SPDAffineMetric)
+
+        super().__init__(
+            space=space,
+            fiber_bundle=CorrelationMatricesAffineBundle(total_space),
+        )
+
+
+class FullRankCorrelationQuotientLieCholeskyMetric(QuotientMetric):
+    """Class for the quotient of the Lie-Cholesky metric."""
+
+    def __init__(self, space, total_space=None):
+        if total_space is None:
+            total_space = SPDMatrices(space.n, equip=False)
+            total_space.equip_with_metric(LieCholeskyMetric)
 
         super().__init__(
             space=space,
