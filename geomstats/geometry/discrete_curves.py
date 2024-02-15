@@ -8,6 +8,7 @@ import logging
 import math
 
 from scipy.interpolate import CubicSpline, PchipInterpolator
+from torchcubicspline import NaturalCubicSpline, natural_cubic_spline_coeffs
 
 import geomstats.backend as gs
 from geomstats.algebra_utils import from_vector_to_diagonal_matrix
@@ -25,6 +26,8 @@ from geomstats.numerics.finite_differences import (
     forward_difference,
     second_centered_difference,
 )
+from geomstats.numerics.optimizers import ScipyMinimize
+from geomstats.numerics.path import UniformlySampledPathEnergy
 from geomstats.vectorization import check_is_batch, get_batch_shape
 
 
@@ -1232,6 +1235,127 @@ class IterativeHorizontalGeodesicAligner:
         return self.discrete_horizontal_geodesic(
             total_space, base_point, point, spline
         )[..., -1, :, :]
+
+
+class FixedPointReparameterizationAction:
+    # TODO: delete as it unnecessary
+    def __init__(self, point):
+        self.t_space = gs.linspace(0.0, 1.0, point.shape[0] + 1)
+
+        spline_coeffs = natural_cubic_spline_coeffs(self.t_space[1:], point)
+        self.spline = NaturalCubicSpline(spline_coeffs).evaluate
+
+    def _get_s_param(self, repar):
+        repar_ = gs.concatenate([gs.array([0.0]), repar, gs.array([1.0])])
+        repar_inverse_coeffs = natural_cubic_spline_coeffs(
+            repar_, gs.expand_dims(self.t_space, axis=-1)
+        )
+        repar_inverse = NaturalCubicSpline(repar_inverse_coeffs).evaluate
+        return gs.squeeze(repar_inverse(self.t_space))
+
+    def __call__(self, group_elem):
+        s_param = self._get_s_param(group_elem)
+        return self.spline(s_param[1:])
+
+
+class FixedPointReparameterizationAction2:
+    def __init__(self, point):
+        self.t_space = gs.linspace(0.0, 1.0, point.shape[0] + 1)
+
+        spline_coeffs = natural_cubic_spline_coeffs(self.t_space[1:], point)
+        self.spline = NaturalCubicSpline(spline_coeffs).evaluate
+
+    def _get_s_param(self, repar):
+        return gs.concatenate([gs.array([0.0]), repar, gs.array([1.0])])
+
+    def __call__(self, group_elem):
+        s_param = self._get_s_param(group_elem)
+        return self.spline(s_param[1:])
+
+
+class RiemannianEnergyBasedAligner:
+    def __init__(self, n_time=100, coeff_length=1.0):
+        self.n_time = n_time
+        self.coeff_length = coeff_length
+
+        self.path_energy = UniformlySampledPathEnergy()
+        self.optimizer = ScipyMinimize(
+            method="L-BFGS-B",
+            jac="autodiff",
+            options={"disp": False},
+        )
+
+    @staticmethod
+    def _length_regularization(total_space, new_point, expected_length):
+        return (expected_length - total_space.length(new_point)) ** 2
+
+    @staticmethod
+    def _zero_regularization(*args):
+        return 0.0
+
+    def _align_single(self, total_space, point, base_point):
+        fp_group_action = FixedPointReparameterizationAction2(point)
+        time = gs.linspace(0.0, 1.0, self.n_time)
+
+        if self.coeff_length:
+            length_reg_func = self._length_regularization
+            expected_length = total_space.length(point)
+        else:
+            length_reg_func = self._zero_regularization
+            expected_length = 0.0
+
+        def objective(repar):
+            new_point = fp_group_action(repar)
+
+            diff = new_point - base_point
+            linear_path = base_point + gs.einsum("t,...ij->...tij", time, diff)
+
+            energy = self.path_energy(total_space, linear_path)
+            length_reg = length_reg_func(total_space, new_point, expected_length)
+
+            return energy + self.coeff_length * length_reg
+
+        init_repar = gs.linspace(0.0, 1.0, total_space.k_sampling_points)
+        res = self.optimizer.minimize(objective, init_repar[1:-1])
+
+        return fp_group_action(res.x)
+
+
+class DynamicRiemannianEnergyBasedAligner:
+    def __init__(
+        self, n_time=100, initial_coeff_length=1.0, length_tol=1e-3, max_iter=5
+    ):
+        # TODO: add rule to increase lambda
+        # TODO: property setter for n_time?
+
+        self.initial_coeff_length = initial_coeff_length
+        self.length_tol = length_tol
+        self.max_iter = max_iter
+
+        self._aligner = RiemannianEnergyBasedAligner(
+            n_time=n_time, coeff_length=initial_coeff_length
+        )
+
+    def _align_single(self, total_space, point, base_point):
+        for _ in range(self.max_iter):
+            aligned = self._aligner._align_single(total_space, point, base_point)
+            length_error = gs.abs(
+                total_space.length(point) - total_space.length(aligned)
+            )
+
+            if length_error < self.length_tol:
+                break
+
+            self._aligner.coeff_length *= 10.0
+        else:
+            logging.warning(
+                "Maximum number of iterations %d reached.",
+                self.max_iter,
+            )
+
+        self._aligner.coeff_length = self.initial_coeff_length
+
+        return aligned
 
 
 class DynamicProgrammingAligner:
