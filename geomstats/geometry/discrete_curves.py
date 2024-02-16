@@ -6,6 +6,7 @@ Lead author: Alice Le Brigant.
 import copy
 import logging
 import math
+from abc import ABC, abstractmethod
 
 from scipy.interpolate import CubicSpline, PchipInterpolator
 from torchcubicspline import NaturalCubicSpline, natural_cubic_spline_coeffs
@@ -1273,36 +1274,82 @@ class FixedPointReparameterizationAction2:
         return self.spline(s_param[1:])
 
 
-class RiemannianEnergyBasedAligner:
-    def __init__(self, n_time=100, coeff_length=1.0):
-        self.n_time = n_time
-        self.coeff_length = coeff_length
+class AlignmentRegularizer(ABC):
+    def __init__(self, coeff=1.0):
+        self.coeff = self._init_coeff = coeff
 
-        self.path_energy = UniformlySampledPathEnergy()
+    def set(self, total_space, point):
+        self.total_space = total_space
+        self.point = point
+        self._at_set()
+
+    def _at_set(self):
+        pass
+
+    @abstractmethod
+    def __call__(self, aligned):
+        pass
+
+    def check_convergence(self, aligned, tol):
+        return True
+
+    def update_coeff(self):
+        self.coeff *= 10
+        return self.coeff
+
+    def restore_coeff(self):
+        self.coeff = self._init_coeff
+
+
+class AlignmentLengthRegularizer(AlignmentRegularizer):
+    # TODO: add cache for error?
+
+    def _at_set(self):
+        self.expected_length = self.total_space.length(self.point)
+
+    def __call__(self, aligned):
+        return (
+            self.coeff * (self.expected_length - self.total_space.length(aligned)) ** 2
+        )
+
+    def check_convergence(self, aligned, atol):
+        error = gs.abs(self.expected_length - self.total_space.length(aligned))
+        return error < atol
+
+
+class DummyRegularizer:
+    def __call__(self, aligned):
+        return 0.0
+
+
+class RiemannianEnergyBasedAligner:
+    def __init__(
+        self,
+        n_time=100,
+        path_energy=None,
+        regularizer=None,
+    ):
+        if path_energy is None:
+            path_energy = UniformlySampledPathEnergy()
+
+        if regularizer is None:
+            regularizer = AlignmentLengthRegularizer()
+
+        self.n_time = n_time
+        self.path_energy = path_energy
+        self.regularizer = regularizer
+
         self.optimizer = ScipyMinimize(
             method="L-BFGS-B",
             jac="autodiff",
             options={"disp": False},
         )
 
-    @staticmethod
-    def _length_regularization(total_space, new_point, expected_length):
-        return (expected_length - total_space.length(new_point)) ** 2
-
-    @staticmethod
-    def _zero_regularization(*args):
-        return 0.0
-
     def _align_single(self, total_space, point, base_point):
         fp_group_action = FixedPointReparameterizationAction2(point)
         time = gs.linspace(0.0, 1.0, self.n_time)
 
-        if self.coeff_length:
-            length_reg_func = self._length_regularization
-            expected_length = total_space.length(point)
-        else:
-            length_reg_func = self._zero_regularization
-            expected_length = 0.0
+        self.regularizer.set(total_space, point)
 
         def objective(repar):
             new_point = fp_group_action(repar)
@@ -1311,9 +1358,9 @@ class RiemannianEnergyBasedAligner:
             linear_path = base_point + gs.einsum("t,...ij->...tij", time, diff)
 
             energy = self.path_energy(total_space, linear_path)
-            length_reg = length_reg_func(total_space, new_point, expected_length)
+            reg_term = self.regularizer(new_point)
 
-            return energy + self.coeff_length * length_reg
+            return energy + reg_term
 
         init_repar = gs.linspace(0.0, 1.0, total_space.k_sampling_points)
         res = self.optimizer.minimize(objective, init_repar[1:-1])
@@ -1321,39 +1368,64 @@ class RiemannianEnergyBasedAligner:
         return fp_group_action(res.x)
 
 
-class DynamicRiemannianEnergyBasedAligner:
-    def __init__(
-        self, n_time=100, initial_coeff_length=1.0, length_tol=1e-3, max_iter=5
-    ):
-        # TODO: add rule to increase lambda
-        # TODO: property setter for n_time?
+class RegularizationBasedAligner:
+    def __init__(self, regularizer=None):
+        if regularizer is None:
+            regularizer = DummyRegularizer()
 
-        self.initial_coeff_length = initial_coeff_length
-        self.length_tol = length_tol
-        self.max_iter = max_iter
+        self.regularizer = regularizer
 
-        self._aligner = RiemannianEnergyBasedAligner(
-            n_time=n_time, coeff_length=initial_coeff_length
+        self.optimizer = ScipyMinimize(
+            method="L-BFGS-B",
+            jac="autodiff",
+            options={"disp": False},
         )
 
     def _align_single(self, total_space, point, base_point):
-        for _ in range(self.max_iter):
-            aligned = self._aligner._align_single(total_space, point, base_point)
-            length_error = gs.abs(
-                total_space.length(point) - total_space.length(aligned)
-            )
+        fp_group_action = FixedPointReparameterizationAction2(point)
 
-            if length_error < self.length_tol:
+        self.regularizer.set(total_space, point)
+
+        def objective(repar):
+            new_point = fp_group_action(repar)
+
+            energy = total_space.metric.squared_dist(base_point, new_point)
+            reg_term = self.regularizer(new_point)
+
+            return energy + reg_term
+
+        init_repar = gs.linspace(0.0, 1.0, total_space.k_sampling_points)
+        res = self.optimizer.minimize(objective, init_repar[1:-1])
+
+        return fp_group_action(res.x)
+
+
+class DynamicRegularizationBasedAligner:
+    def __init__(
+        self,
+        aligner,
+        tol=1e-3,
+        max_iter=5,
+    ):
+        self.aligner = aligner
+        self.tol = tol
+        self.max_iter = max_iter
+
+    def _align_single(self, total_space, point, base_point):
+        for _ in range(self.max_iter):
+            aligned = self.aligner._align_single(total_space, point, base_point)
+
+            if self.aligner.regularizer.check_convergence(aligned, self.tol):
                 break
 
-            self._aligner.coeff_length *= 10.0
+            self.aligner.regularizer.update_coeff()
         else:
             logging.warning(
                 "Maximum number of iterations %d reached.",
                 self.max_iter,
             )
 
-        self._aligner.coeff_length = self.initial_coeff_length
+        self.aligner.regularizer.restore_coeff()
 
         return aligned
 
