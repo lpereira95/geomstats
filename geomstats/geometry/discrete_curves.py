@@ -9,6 +9,9 @@ import math
 from abc import ABC, abstractmethod
 
 from scipy.interpolate import CubicSpline, PchipInterpolator
+
+# TODO: control beeter imports
+# TODO: maybe move this to numerics?
 from torchcubicspline import NaturalCubicSpline, natural_cubic_spline_coeffs
 
 import geomstats.backend as gs
@@ -27,9 +30,12 @@ from geomstats.numerics.finite_differences import (
     forward_difference,
     second_centered_difference,
 )
+from geomstats.numerics.interpolation import MonotonicLinearInterpolator1D
 from geomstats.numerics.optimizers import ScipyMinimize
 from geomstats.numerics.path import UniformlySampledPathEnergy
 from geomstats.vectorization import check_is_batch, get_batch_shape
+
+# TODO: rethink design of aligner (receive total space at init?)
 
 
 def insert_zeros(array, axis=-1, end=False):
@@ -1238,15 +1244,42 @@ class IterativeHorizontalGeodesicAligner:
         )[..., -1, :, :]
 
 
-class FixedPointReparameterizationAction:
-    # TODO: delete as it unnecessary
-    def __init__(self, point):
+class FixedPointGroupAction(ABC):
+    def __init__(self, point=None):
+        self.point = None
+        self.set(point)
+
+    def set(self, point):
+        if not self._check_new(point):
+            return
+
+        self._at_set()
+
+    def _at_set(self):
+        pass
+
+    def _check_new(self, point):
+        previous_point = self.point
+        self.point = point
+        if self.point is None or (
+            previous_point is not None
+            and gs.amax(gs.abs(point - previous_point)) < 1e-4
+        ):
+            return False
+
+        return True
+
+
+class FixedPointReparameterizationAction(FixedPointGroupAction):
+    def _at_set(self, point):
         self.t_space = gs.linspace(0.0, 1.0, point.shape[0] + 1)
 
+        # TODO: fix
         spline_coeffs = natural_cubic_spline_coeffs(self.t_space[1:], point)
         self.spline = NaturalCubicSpline(spline_coeffs).evaluate
 
     def _get_s_param(self, repar):
+        # TODO: fix
         repar_ = gs.concatenate([gs.array([0.0]), repar, gs.array([1.0])])
         repar_inverse_coeffs = natural_cubic_spline_coeffs(
             repar_, gs.expand_dims(self.t_space, axis=-1)
@@ -1259,14 +1292,19 @@ class FixedPointReparameterizationAction:
         return self.spline(s_param[1:])
 
 
-class FixedPointReparameterizationAction2:
-    def __init__(self, point):
+class FixedPointReparameterizationAction2(FixedPointGroupAction):
+    def set(self, point):
+        if not self._check_new(point):
+            return
+
         self.t_space = gs.linspace(0.0, 1.0, point.shape[0] + 1)
 
+        # TODO: fix
         spline_coeffs = natural_cubic_spline_coeffs(self.t_space[1:], point)
         self.spline = NaturalCubicSpline(spline_coeffs).evaluate
 
     def _get_s_param(self, repar):
+        # NB: represents the inverse
         return gs.concatenate([gs.array([0.0]), repar, gs.array([1.0])])
 
     def __call__(self, group_elem):
@@ -1275,12 +1313,27 @@ class FixedPointReparameterizationAction2:
 
 
 class AlignmentRegularizer(ABC):
-    def __init__(self, coeff=1.0):
+    # TODO: should it also get base_point?
+    def __init__(self, point=None, coeff=1.0):
+        self.set(point)
+
         self.coeff = self._init_coeff = coeff
 
-    def set(self, total_space, point):
-        self.total_space = total_space
+    def _check_new(self, point):
+        previous_point = self.point
         self.point = point
+        if self.point is None or (
+            previous_point is not None
+            and gs.amax(gs.abs(point - previous_point)) < 1e-4
+        ):
+            return False
+
+        return True
+
+    def set(self, point):
+        if self._check_new(point):
+            return
+
         self._at_set()
 
     def _at_set(self):
@@ -1302,22 +1355,24 @@ class AlignmentRegularizer(ABC):
 
 
 class AlignmentLengthRegularizer(AlignmentRegularizer):
-    # TODO: add cache for error?
+    def __init__(self, total_space, point=None, coeff=1.0):
+        self._total_space = total_space
+        super().__init__(point=point, coeff=coeff)
 
     def _at_set(self):
-        self.expected_length = self.total_space.length(self.point)
+        self.expected_length = self._total_space.length(self.point)
 
     def __call__(self, aligned):
         return (
-            self.coeff * (self.expected_length - self.total_space.length(aligned)) ** 2
+            self.coeff * (self.expected_length - self._total_space.length(aligned)) ** 2
         )
 
     def check_convergence(self, aligned, atol):
-        error = gs.abs(self.expected_length - self.total_space.length(aligned))
+        error = gs.abs(self.expected_length - self._total_space.length(aligned))
         return error < atol
 
 
-class DummyRegularizer:
+class DummyRegularizer(AlignmentRegularizer):
     def __call__(self, aligned):
         return 0.0
 
@@ -1325,19 +1380,26 @@ class DummyRegularizer:
 class RiemannianEnergyBasedAligner:
     def __init__(
         self,
+        total_space,
         n_time=100,
         path_energy=None,
         regularizer=None,
+        fp_group_action=None,
     ):
+        self._total_space = total_space
         if path_energy is None:
             path_energy = UniformlySampledPathEnergy()
 
         if regularizer is None:
-            regularizer = AlignmentLengthRegularizer()
+            regularizer = AlignmentLengthRegularizer(total_space)
+
+        if fp_group_action is None:
+            fp_group_action = FixedPointReparameterizationAction2()
 
         self.n_time = n_time
         self.path_energy = path_energy
         self.regularizer = regularizer
+        self.fp_group_action = fp_group_action
 
         self.optimizer = ScipyMinimize(
             method="L-BFGS-B",
@@ -1346,13 +1408,16 @@ class RiemannianEnergyBasedAligner:
         )
 
     def _align_single(self, total_space, point, base_point):
-        fp_group_action = FixedPointReparameterizationAction2(point)
+        # TODO: remove total space from signature
+        # TODO: add init
+        # TODO: homogenize
         time = gs.linspace(0.0, 1.0, self.n_time)
 
-        self.regularizer.set(total_space, point)
+        self.fp_group_action.set(point)
+        self.regularizer.set(point)
 
         def objective(repar):
-            new_point = fp_group_action(repar)
+            new_point = self.fp_group_action(repar)
 
             diff = new_point - base_point
             linear_path = base_point + gs.einsum("t,...ij->...tij", time, diff)
@@ -1365,15 +1430,20 @@ class RiemannianEnergyBasedAligner:
         init_repar = gs.linspace(0.0, 1.0, total_space.k_sampling_points)
         res = self.optimizer.minimize(objective, init_repar[1:-1])
 
-        return fp_group_action(res.x)
+        return self.fp_group_action(res.x)
 
 
 class RegularizationBasedAligner:
-    def __init__(self, regularizer=None):
+    def __init__(self, total_space, regularizer=None, fp_group_action=None):
+        self._total_space = total_space
         if regularizer is None:
             regularizer = DummyRegularizer()
 
+        if fp_group_action is None:
+            fp_group_action = FixedPointReparameterizationAction2()
+
         self.regularizer = regularizer
+        self.fp_group_action = fp_group_action
 
         self.optimizer = ScipyMinimize(
             method="L-BFGS-B",
@@ -1382,12 +1452,12 @@ class RegularizationBasedAligner:
         )
 
     def _align_single(self, total_space, point, base_point):
-        fp_group_action = FixedPointReparameterizationAction2(point)
-
-        self.regularizer.set(total_space, point)
+        # TODO: remove total space from signature (use it in init)
+        self.fp_group_action.set(point)
+        self.regularizer.set(point)
 
         def objective(repar):
-            new_point = fp_group_action(repar)
+            new_point = self.fp_group_action(repar)
 
             energy = total_space.metric.squared_dist(base_point, new_point)
             reg_term = self.regularizer(new_point)
@@ -1397,7 +1467,7 @@ class RegularizationBasedAligner:
         init_repar = gs.linspace(0.0, 1.0, total_space.k_sampling_points)
         res = self.optimizer.minimize(objective, init_repar[1:-1])
 
-        return fp_group_action(res.x)
+        return self.fp_group_action(res.x)
 
 
 class DynamicRegularizationBasedAligner:
@@ -1412,6 +1482,7 @@ class DynamicRegularizationBasedAligner:
         self.max_iter = max_iter
 
     def _align_single(self, total_space, point, base_point):
+        # TODO: remove total space from signature (use it in init)
         for _ in range(self.max_iter):
             aligned = self.aligner._align_single(total_space, point, base_point)
 
@@ -1428,6 +1499,170 @@ class DynamicRegularizationBasedAligner:
         self.aligner.regularizer.restore_coeff()
 
         return aligned
+
+
+class CurvarcLengthParameterization(FixedPointGroupAction):
+    # TODO: rethink design (e.g. cache based instead? factory?)
+    # TODO: rethink name
+    def __init__(self, total_space, point=None):
+        self._total_space = total_space
+        self.curvature = None
+        self.length = None
+        self.s_param = None
+        self.spline = None
+
+        super().__init__(point)
+
+    def _at_set(self):
+        # NB: assumes point comes from arclength parameterization
+        # TODO: add check for reparameterization type?
+
+        # TODO: somehow move to total_space?
+        total_space = self._total_space
+        point = self.point
+
+        k_sampling_points = total_space.k_sampling_points
+        fd_axis = -total_space.point_ndim
+
+        delta = 1 / (k_sampling_points - 1)
+
+        point_with_origin = total_space.insert_origin(point)
+        velocity = forward_difference(point_with_origin, delta=delta, axis=fd_axis)
+
+        acc_0 = forward_difference(velocity[..., :2, :], delta=delta, axis=fd_axis)
+        acc_last = second_centered_difference(
+            point_with_origin, delta=delta, axis=fd_axis
+        )
+        acceleration = gs.concatenate([acc_0, acc_last])
+
+        self.length = gs.sum(gs.linalg.norm(velocity, axis=-1)) * delta
+        self.curvature = gs.linalg.norm(acceleration, axis=-1)
+
+        self.s_param = s_param = gs.linspace(0.0, 1.0, k_sampling_points)
+        spline_coeffs = natural_cubic_spline_coeffs(s_param, point_with_origin)
+        self.spline = NaturalCubicSpline(spline_coeffs).evaluate
+
+    def param(self, length_coeff, curv_coeff):
+        # TODO: rename?
+        k_sampling_points = self._total_space.k_sampling_points
+        delta = 1 / (k_sampling_points - 1)
+
+        den = (
+            length_coeff * self.length
+            + gs.sum(self.curvature**curv_coeff, axis=-1) * delta
+        )
+        num = length_coeff * self.length * self.s_param[1:] + delta * gs.cumsum(
+            self.curvature**curv_coeff
+        )
+
+        param = num / den
+
+        return gs.concatenate([gs.array([0.0]), param])
+
+    def __call__(self, fparam):
+        # this implements the action on point
+        # TODO: bring in 2-parameter family for optimization
+
+        length_coeff = fparam[0]
+        r_param = self.param(length_coeff, 1)
+
+        # repar_inverse = PchipInterpolator(r_param, self.s_param)
+        # new_r_param = self.spline(gs.from_numpy(repar_inverse(self.param)))
+
+        # new_r_param = gs.squeeze(
+        #     torchinterp1d.interp1d(r_param, self.s_param, self.s_param),
+        # )
+
+        # repar_inverse_coeffs = natural_cubic_spline_coeffs(
+        #     r_param, gs.expand_dims(self.s_param, axis=-1)
+        # )
+        # new_r_param = gs.squeeze(
+        #     NaturalCubicSpline(repar_inverse_coeffs).evaluate(self.s_param),
+        # )
+        repar_inverse = MonotonicLinearInterpolator1D(r_param, self.s_param)
+        new_r_param = gs.concatenate(
+            [
+                repar_inverse(self.s_param[1:-1]),
+                gs.array([1.0]),
+            ]
+        )
+
+        # return self.spline(new_r_param[1:])
+        return self.spline(new_r_param)
+
+
+class ParameterBasedAlignment:
+    # TODO: continue here
+    def __init__(self, total_space, fp_group_action=None):
+        self._total_space = total_space
+        if fp_group_action is None:
+            fp_group_action = CurvarcLengthParameterization(total_space)
+
+        self.fp_group_action = fp_group_action
+
+        self.optimizer = ScipyMinimize(
+            method="L-BFGS-B",
+            jac="autodiff",
+            options={"disp": False},
+        )
+
+    def _align_single(self, total_space, point, base_point):
+        # TODO: remove total space from the signature
+        # TODO: need to control initialization
+
+        self.fp_group_action.set(point)
+
+        def objective(fparam):
+            new_point = self.fp_group_action(fparam)
+            return total_space.metric.squared_dist(base_point, new_point)
+
+        init_fparam = gs.array([1.0])
+        res = self.optimizer.minimize(objective, init_fparam)
+
+        return self.fp_group_action(res.x)
+
+
+class SymmetricParameterBasedAlignment:
+    def __init__(
+        self,
+        total_space,
+        fp_group_action_point=None,
+        fp_group_action_base_point=None,
+    ):
+        self._total_space = total_space
+
+        if fp_group_action_point is None:
+            fp_group_action_point = CurvarcLengthParameterization(total_space)
+
+        if fp_group_action_base_point is None:
+            fp_group_action_base_point = CurvarcLengthParameterization(total_space)
+
+        self.fp_group_action_point = fp_group_action_point
+        self.fp_group_action_base_point = fp_group_action_base_point
+
+        self.optimizer = ScipyMinimize(
+            method="L-BFGS-B",
+            jac="autodiff",
+            options={"disp": False},
+        )
+
+    def _align_single(self, total_space, point, base_point):
+        # TODO: remove total space from the signature
+        # TODO: need to control initialization
+        self.fp_group_action_base_point.set(base_point)
+        self.fp_group_action_point.set(point)
+
+        def objective(fparam):
+            base_point_fparam, point_fparam = gs.split(fparam, 2)
+            new_base_point = self.fp_group_action_base_point(base_point_fparam)
+            new_point = self.fp_group_action_point(point_fparam)
+
+            return total_space.metric.squared_dist(new_base_point, new_point)
+
+        init_fparam = gs.array([1.0, 1.0])
+        res = self.optimizer.minimize(objective, init_fparam)
+
+        return self.fp_group_action_point(res.x)
 
 
 class DynamicProgrammingAligner:
