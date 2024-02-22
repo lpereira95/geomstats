@@ -1,5 +1,7 @@
 """Interpolation machinery."""
 
+import torch
+
 import geomstats.backend as gs
 
 
@@ -81,3 +83,24 @@ class LinearInterpolator1D:
 
         ijk = "ijk"[self.point_ndim]
         return initial_point + gs.einsum(f"t,...t{ijk}->...t{ijk}", ratio, diff)
+
+
+class MonotonicLinearInterpolator1D:
+    def __init__(self, s_param, data):
+        self.s_param = s_param
+        self.data = data
+
+    def __call__(self, t):
+        # t must be sorted
+
+        # TODO: add to backend
+        index = torch.searchsorted(self.s_param, t)
+
+        left = self.s_param[index - 1]
+        right = self.s_param[index]
+        ratio = (t - left) / (right - left)
+
+        left_data = self.data[index - 1]
+        right_data = self.data[index]
+
+        return left_data + ratio * (right_data - left_data)
