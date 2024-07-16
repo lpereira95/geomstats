@@ -43,7 +43,7 @@ from geomstats.geometry.symmetric_matrices import (
     NullRowSumsSymmetricMatrices,
     SymmetricHollowMatrices,
 )
-from geomstats.numerics.optimization import NewtonMethod
+from geomstats.numerics.optimization import NewtonMethod, ScipyMinimize
 
 
 def corr_map(point):
@@ -1117,6 +1117,186 @@ class LogScaledMetric(PullbackDiffeoMetric):
         )
 
         super().__init__(space=space, diffeo=diffeo, image_space=image_space)
+
+
+def _trace_log_from_diag(corr_matrix, diag):
+    exp_diag = gs.exp(diag)
+    aux = logmh(FullRankCorrelationMatrices.diag_action(exp_diag, corr_matrix))
+
+    return Matrices.trace_product(aux, aux)
+
+
+class UniqueDiagonalMatrixAlgorithm2:
+    def __init__(self, optimizer=None):
+        if optimizer is None:
+            # TODO: control autodiff
+            optimizer = ScipyMinimize(autodiff_jac=True)
+
+        self.optimizer = optimizer
+
+    def _call_single(self, corr_matrix):
+        fun = lambda x: _trace_log_from_diag(corr_matrix, x)
+
+        x0 = gs.ones(corr_matrix.shape[-1])
+
+        res = self.optimizer.minimize(fun, x0)
+        return res.x
+
+    def __call__(self, corr_matrix):
+        """Find unique diagonal matrix.
+
+        Returns
+        -------
+        diag_mat : array-like, shape=[..., n]
+        """
+        # TODO: homogenize batch? (see other algorithms)
+        if corr_matrix.ndim == 2:
+            return self._call_single(corr_matrix)
+
+        # TODO: fix
+        batch_shape = corr_matrix.shape[:-2]
+        if len(batch_shape) == 1:
+            return gs.stack([self._call_single(sym_mat_) for sym_mat_ in corr_matrix])
+
+        mat_shape = corr_matrix.shape[-2:]
+        flat_corr_mat = gs.reshape(corr_matrix, (-1,) + mat_shape)
+        out = gs.stack([self._call_single(corr_mat_) for corr_mat_ in flat_corr_mat])
+        return gs.reshape(out, batch_shape + mat_shape)
+
+
+class LogHollowDiffeo(Diffeo):
+    """Log-hollow diffeomorphism."""
+
+    def __init__(self):
+        super().__init__()
+        self.unique_diag = UniqueDiagonalMatrixAlgorithm2()
+
+    def __call__(self, base_point):
+        """Diffeomorphism at base point.
+
+        Parameters
+        ----------
+        base_point : array-like, shape=[..., n, n]
+            Base point.
+
+        Returns
+        -------
+        image_point : array-like, shape=[..., n, n]
+            Image point.
+        """
+        # TODO: return diag vec and simplify code
+        exp_diag_vec = gs.exp(self.unique_diag(base_point))
+        # TODO: check what was going on before update
+        aux_mat = FullRankCorrelationMatrices.diag_action(exp_diag_vec, base_point)
+        return off_map(logmh(aux_mat))
+
+    def inverse(self, image_point):
+        r"""Inverse diffeomorphism at image point.
+
+        :math:`f^{-1}: N \rightarrow M`
+
+        Parameters
+        ----------
+        image_point : array-like, shape=[..., n, n]
+            Image point.
+
+        Returns
+        -------
+        base_point : array-like, shape=[..., n, n]
+            Base point.
+        """
+        return corr_map(expmh(image_point))
+
+    def tangent(self, tangent_vec, base_point=None, image_point=None):
+        r"""Tangent diffeomorphism at base point.
+
+        df_p is a linear map from T_pM to T_f(p)N.
+
+        Parameters
+        ----------
+        tangent_vec : array-like, shape=[..., n, n]
+            Tangent vector at base point.
+        base_point : array-like, shape=[..., n, n]
+            Base point.
+        image_point : array-like, shape=[..., n, n]
+            Image point.
+
+        Returns
+        -------
+        image_tangent_vec : array-like, shape=[..., n, n]
+            Image tangent vector at image of the base point.
+        """
+        # TODO: confirm
+        if image_point is None:
+            exp_diag_vec = gs.exp(self.unique_diag(base_point))
+            base_point_ = FullRankCorrelationMatrices.diag_action(
+                exp_diag_vec, base_point
+            )
+        else:
+            # TODO:  update
+            base_point_ = expmh(image_point)
+
+        delta = Matrices.diagonal(base_point_) ** 0.5
+        aux = FullRankCorrelationMatrices.diag_action(delta, tangent_vec)
+        eye = gs.eye(base_point_.shape[-1])
+        tangent_vec_0 = -2 * gs.vec_to_diag(
+            gs.sum(
+                Matrices.mul(
+                    gs.linalg.inv(eye + base_point_),
+                    aux,
+                ),
+                axis=-1,
+            )
+        )
+
+        tangent_vec_ = aux + 0.5 * (
+            Matrices.mul(tangent_vec_0, base_point_)
+            + Matrices.mul(base_point_, tangent_vec_0)
+        )
+
+        return off_map(
+            SymMatrixLog.tangent(
+                tangent_vec=tangent_vec_,
+                base_point=base_point_,
+                image_point=image_point,
+            )
+        )
+
+    def inverse_tangent(self, image_tangent_vec, image_point=None, base_point=None):
+        r"""Inverse tangent diffeomorphism at image point.
+
+        df^-1_p is a linear map from T_f(p)N to T_pM
+
+        Parameters
+        ----------
+        image_tangent_vec : array-like, shape=[..., n, n]
+            Image tangent vector at image point.
+        image_point : array-like, shape=[..., n, n]
+            Image point.
+        base_point : array-like, shape=[..., n, n]
+            Base point.
+
+        Returns
+        -------
+        tangent_vec : array-like, shape=[..., n, n]
+            Tangent vector at base point.
+        """
+        # TODO: confirm
+        if image_point is not None:
+            base_point_row_1 = expmh(image_point)
+        else:
+            # TODO: update
+            diag_vec = self.unique_diag(base_point)
+            base_point_row_1 = FullRankCorrelationMatrices.diag_action(
+                diag_vec, base_point
+            )
+
+        tangent_vec_row_1 = SymMatrixLog.inverse_tangent(
+            image_tangent_vec=image_tangent_vec,
+            image_point=image_point,
+            base_point=base_point_row_1,
+        )
+        return tangent_corr_map(tangent_vec_row_1, base_point_row_1)
 
 
 register_quotient(
