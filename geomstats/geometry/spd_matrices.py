@@ -5,11 +5,14 @@ Lead authors: Yann Thanwerdas and Olivier Bisson.
 
 import math
 
+import scipy
+
 import geomstats.backend as gs
 from geomstats.algebra_utils import columnwise_scaling
 from geomstats.geometry.base import VectorSpaceOpenSet
 from geomstats.geometry.complex_matrices import ComplexMatrices
 from geomstats.geometry.diffeo import Diffeo
+from geomstats.geometry.fiber_bundle import FiberBundle
 from geomstats.geometry.general_linear import GeneralLinear
 from geomstats.geometry.hermitian_matrices import apply_func_to_eigvalsh, expmh, powermh
 from geomstats.geometry.matrices import Matrices, MatricesMetric
@@ -1139,3 +1142,90 @@ class LieCholeskyMetric(PullbackDiffeoMetric):
         diffeo = CholeskyMap()
 
         super().__init__(space=space, diffeo=diffeo, image_space=image_space)
+
+
+class PolarDecompositionBundle(FiberBundle):
+    """Polar decomposition bundle."""
+
+    # TODO: update docstrings
+
+    def __init__(self, total_space):
+        super().__init__(total_space=total_space, aligner=True)
+
+    @staticmethod
+    def riemannian_submersion(point):
+        r"""Riemannian submersion.
+
+        .. math::
+
+            X = \Sigma R
+
+        .. math::
+
+            \pi(X) = \Sigma
+        """
+        _, spd_point = scipy.linalg.polar(point, side="left")
+        return gs.from_numpy(spd_point)
+
+    def tangent_riemannian_submersion(self, tangent_vec, base_point):
+        r"""Tangent Riemannian submersion.
+
+        .. math::
+
+            d_X \pi(V) = T_{\Sigma}^{-1}(V X^\top + X V^\top)
+
+
+        with :math:`\Sigma = \pi(X)` and :math:`T_E^{-1}(Z)` denotes
+        the unique solution :math:`A` to the Sylvester equation
+
+        .. math::
+
+            E A + A E = Z
+        """
+        # TODO: add verifications to tests
+        sigma = self.riemannian_submersion(base_point)
+
+        z = Matrices.mul(tangent_vec, Matrices.transpose(base_point)) + Matrices.mul(
+            base_point, Matrices.transpose(tangent_vec)
+        )
+
+        return gs.linalg.solve_sylvester(sigma, sigma, z)
+
+    @staticmethod
+    def lift(point):
+        """Lift."""
+        return gs.linalg.cholesky(
+            Matrices.mul(point, gs.transpose(point)),
+        )
+
+    def horizontal_lift(self, tangent_vec, base_point=None, fiber_point=None):
+        r"""Horizontal lift.
+
+        .. math::
+
+            \widetilde{V} =  T_{\Sigma \Sigma^T}^{-1}(\Sigma V + V \Sigma) X
+        """
+        if base_point is None and fiber_point is None:
+            raise ValueError(
+                "Either a point (of the total space) or a "
+                "base point (of the base manifold) must be "
+                "given."
+            )
+
+        if base_point is None:
+            base_point = self.lift(fiber_point)
+
+        if fiber_point is None:
+            fiber_point = self.riemannian_submersion(base_point)
+
+        sylv_base = Matrices.mul(base_point, Matrices.transpose(base_point))
+
+        z = Matrices.mul(
+            Matrices.mul(base_point, tangent_vec)
+            + Matrices.mul(tangent_vec, base_point)
+        )
+
+        return Matrices.mul(
+            gs.linalg.solve_sylvester(sylv_base, sylv_base, z),
+            fiber_point,
+        )
