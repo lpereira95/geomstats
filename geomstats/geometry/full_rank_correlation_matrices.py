@@ -13,11 +13,11 @@ import logging
 
 import geomstats.backend as gs
 from geomstats.algebra_utils import rowwise_scaling
-from geomstats.geometry.base import LevelSet
+from geomstats.geometry.base import DiffeomorphicManifold, LevelSet
 from geomstats.geometry.diffeo import ComposedDiffeo, Diffeo
 from geomstats.geometry.fiber_bundle import DistanceMinimizingAligner, FiberBundle
 from geomstats.geometry.general_linear import GeneralLinear
-from geomstats.geometry.hermitian_matrices import expmh
+from geomstats.geometry.hermitian_matrices import expmh, powermh
 from geomstats.geometry.hyperboloid import Hyperboloid
 from geomstats.geometry.lower_triangular_matrices import StrictlyLowerTriangularMatrices
 from geomstats.geometry.manifold import register_quotient
@@ -1350,3 +1350,114 @@ register_quotient(
     GroupAction=FullRankCorrelationMatrices.diag_action,
     FiberBundle=CorrelationMatricesBundle,
 )
+
+
+class MatrixMatrixTransposeDiffeo(Diffeo):
+    # TODO: uppdate all docstrings
+
+    def __call__(self, base_point):
+        """Diffeomorphism at base point.
+
+        Parameters
+        ----------
+        base_point : array-like, shape=[..., *space_shape]
+            Base point.
+
+        Returns
+        -------
+        image_point : array-like, shape=[..., *image_shape]
+            Image point.
+        """
+        return Matrices.mul(base_point, Matrices.transpose(base_point))
+
+    def inverse(self, image_point):
+        r"""Inverse diffeomorphism at image point.
+
+        :math:`f^{-1}: N \rightarrow M`
+
+        Parameters
+        ----------
+        image_point : array-like, shape=[..., *image_shape]
+            Image point.
+
+        Returns
+        -------
+        base_point : array-like, shape=[..., *space_shape]
+            Base point.
+        """
+        return powermh(image_point, 1 / 2)
+
+    def tangent(self, tangent_vec, base_point=None, image_point=None):
+        r"""Tangent diffeomorphism at base point.
+
+        df_p is a linear map from T_pM to T_f(p)N.
+
+        Parameters
+        ----------
+        tangent_vec : array-like, shape=[..., *space_shape]
+            Tangent vector at base point.
+        base_point : array-like, shape=[..., *space_shape]
+            Base point.
+        image_point : array-like, shape=[..., *image_shape]
+            Image point.
+
+        Returns
+        -------
+        image_tangent_vec : array-like, shape=[..., *image_shape]
+            Image tangent vector at image of the base point.
+        """
+        if base_point is None:
+            base_point = self.inverse(image_point)
+
+        return Matrices.mul(tangent_vec, Matrices.transpose(base_point)) + Matrices.mul(
+            base_point, Matrices.transpose(tangent_vec)
+        )
+
+    def inverse_tangent(self, image_tangent_vec, image_point=None, base_point=None):
+        r"""Inverse tangent diffeomorphism at image point.
+
+        df^-1_p is a linear map from T_f(p)N to T_pM
+
+        .. math::
+
+            d_X \pi(V) = T_{Q^{1/2}}^{-1}(V)
+
+
+        Parameters
+        ----------
+        image_tangent_vec : array-like, shape=[..., *image_shape]
+            Image tangent vector at image point.
+        image_point : array-like, shape=[..., *image_shape]
+            Image point.
+        base_point : array-like, shape=[..., *space_shape]
+            Base point.
+
+        Returns
+        -------
+        tangent_vec : array-like, shape=[..., *space_shape]
+            Tangent vector at base point.
+        """
+        if base_point is None:
+            base_point = self.inverse(image_point)
+
+        return gs.linalg.solve_sylvester(base_point, base_point, image_tangent_vec)
+
+
+class QuotientPolySpheres(DiffeomorphicManifold):
+    def __init__(self, n=None, diffeo=None, image_space=None):
+        if n is None and image_space is None:
+            raise ValueError("Need to define `n` or `image_space`.")
+
+        if diffeo is None:
+            diffeo = MatrixMatrixTransposeDiffeo()
+
+        if image_space is None:
+            image_space = FullRankCorrelationMatrices(n=n, equip=False)
+
+        super().__init__(
+            diffeo,
+            image_space,
+            dim=image_space.dim,
+            shape=image_space.shape,
+            equip=False,
+        )
