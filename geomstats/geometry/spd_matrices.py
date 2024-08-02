@@ -5,8 +5,6 @@ Lead authors: Yann Thanwerdas and Olivier Bisson.
 
 import math
 
-import scipy
-
 import geomstats.backend as gs
 from geomstats.algebra_utils import columnwise_scaling
 from geomstats.geometry.base import VectorSpaceOpenSet
@@ -1145,9 +1143,13 @@ class LieCholeskyMetric(PullbackDiffeoMetric):
 
 
 class PolarDecompositionBundle(FiberBundle):
-    """Polar decomposition bundle."""
+    """Polar decomposition bundle.
 
-    # TODO: update docstrings
+    Parameters
+    ----------
+    total_space : Manifold
+        Space equipped with a group action.
+    """
 
     def __init__(self, total_space):
         super().__init__(total_space=total_space, aligner=True)
@@ -1156,16 +1158,30 @@ class PolarDecompositionBundle(FiberBundle):
     def riemannian_submersion(point):
         r"""Riemannian submersion.
 
+        Consider the (left) polar decomposition:
+
         .. math::
 
             X = \Sigma R
 
+        The submersion is:
+
         .. math::
 
             \pi(X) = \Sigma
+
+        Parameters
+        ----------
+        point : array-like, shape=[..., n, n]
+            Point in the total space.
+
+        Returns
+        -------
+        quotient_point : array-like, shape=[..., n, n]
+            Point in the base space.
         """
-        _, spd_point = scipy.linalg.polar(point, side="left")
-        return gs.from_numpy(spd_point)
+        _, spd_point = gs.linalg.polar(point, side="left")
+        return spd_point
 
     def tangent_riemannian_submersion(self, tangent_vec, base_point):
         r"""Tangent Riemannian submersion.
@@ -1174,29 +1190,32 @@ class PolarDecompositionBundle(FiberBundle):
 
             d_X \pi(V) = T_{\Sigma}^{-1}(V X^\top + X V^\top)
 
-
-        with :math:`\Sigma = \pi(X)` and :math:`T_E^{-1}(Z)` denotes
+        where :math:`\Sigma = \pi(X)` and :math:`T_E^{-1}(Z)` denotes
         the unique solution :math:`A` to the Sylvester equation
 
         .. math::
 
             E A + A E = Z
+
+        Parameters
+        ----------
+        tangent_vec : array-like, shape=[..., n, n]
+            Tangent vector at base point.
+        base_point : array-like, shape=[..., n, n]
+            Point in the total space.
+
+        Returns
+        -------
+        quotient_tangent_vec : array-like, shape=[..., n, n]
+            Tangent vector in the quotient space
         """
-        # TODO: add verifications to tests
         sigma = self.riemannian_submersion(base_point)
 
-        z = Matrices.mul(tangent_vec, Matrices.transpose(base_point)) + Matrices.mul(
-            base_point, Matrices.transpose(tangent_vec)
-        )
+        sylv_rhs = Matrices.mul(
+            tangent_vec, Matrices.transpose(base_point)
+        ) + Matrices.mul(base_point, Matrices.transpose(tangent_vec))
 
-        return gs.linalg.solve_sylvester(sigma, sigma, z)
-
-    @staticmethod
-    def lift(point):
-        """Lift."""
-        return gs.linalg.cholesky(
-            Matrices.mul(point, gs.transpose(point)),
-        )
+        return gs.linalg.solve_sylvester(sigma, sigma, sylv_rhs)
 
     def horizontal_lift(self, tangent_vec, base_point=None, fiber_point=None):
         r"""Horizontal lift.
@@ -1204,6 +1223,27 @@ class PolarDecompositionBundle(FiberBundle):
         .. math::
 
             \widetilde{V} =  T_{\Sigma \Sigma^T}^{-1}(\Sigma V + V \Sigma) X
+
+        where :math:`T_E^{-1}(Z)` denotes
+        the unique solution :math:`A` to the Sylvester equation
+
+        .. math::
+
+            E A + A E = Z
+
+        Parameters
+        ----------
+        tangent_vec : array-like, shape=[..., n, n]
+            Tangent vector at base point.
+        base_point : array-like, shape=[..., n, n]
+            Point in the base space.
+        fiber_point : array-like, shape=[..., n, n]
+            Point in the total space.
+
+        Returns
+        -------
+        horizontal_vec : array-like, shape=[..., n, n]
+            Horizontal tangent vector at fiber point.
         """
         if base_point is None and fiber_point is None:
             raise ValueError(
@@ -1213,19 +1253,56 @@ class PolarDecompositionBundle(FiberBundle):
             )
 
         if base_point is None:
-            base_point = self.lift(fiber_point)
+            base_point = self.riemannian_submersion(fiber_point)
 
         if fiber_point is None:
-            fiber_point = self.riemannian_submersion(base_point)
+            fiber_point = self.lift(base_point)
 
         sylv_base = Matrices.mul(base_point, Matrices.transpose(base_point))
 
-        z = Matrices.mul(
+        sylv_rhs = Matrices.mul(
             Matrices.mul(base_point, tangent_vec)
             + Matrices.mul(tangent_vec, base_point)
         )
 
         return Matrices.mul(
-            gs.linalg.solve_sylvester(sylv_base, sylv_base, z),
+            gs.linalg.solve_sylvester(sylv_base, sylv_base, sylv_rhs),
             fiber_point,
+        )
+
+    def vertical_projection(self, tangent_vec, base_point):
+        r"""Project to vertical subspace.
+
+        .. math::
+
+            \operatorname{ver}_X (V) = X T_{X^\top X}^{-1}
+            (X^\top V - V^\top X)
+
+        where :math:`T_E^{-1}(Z)` denotes
+        the unique solution :math:`A` to the Sylvester equation
+
+        .. math::
+
+            E A + A E = Z
+
+        Parameters
+        ----------
+        tangent_vec : array-like, shape=[..., n, n]
+            Tangent vector at base point.
+        base_point : array-like, shape=[..., n, n]
+            Point in the total space.
+
+        Returns
+        -------
+        vertical : array-like, shape=[..., n, n]
+            Vertical component of the tangent vector.
+        """
+        sylv_rhs = Matrices.mul(
+            Matrices.transpose(base_point), tangent_vec
+        ) - Matrices.mul(Matrices.transpose(tangent_vec), base_point)
+        sylv_base = Matrices.mul(Matrices.transpose(base_point), base_point)
+
+        return Matrices.mul(
+            base_point,
+            gs.linalg.solve_sylvester(sylv_base, sylv_base, sylv_rhs),
         )

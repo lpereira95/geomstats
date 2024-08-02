@@ -3,6 +3,8 @@ import random
 import pytest
 
 import geomstats.backend as gs
+from geomstats.geometry.general_linear import GeneralLinear
+from geomstats.geometry.group_action import SpecialOrthogonalComposeAction
 from geomstats.geometry.positive_lower_triangular_matrices import (
     PositiveLowerTriangularMatrices,
 )
@@ -11,6 +13,7 @@ from geomstats.geometry.spd_matrices import (
     CholeskyMap,
     LieCholeskyMetric,
     MatrixPower,
+    PolarDecompositionBundle,
     SPDAffineMetric,
     SPDBuresWassersteinMetric,
     SPDEuclideanMetric,
@@ -23,11 +26,14 @@ from geomstats.geometry.symmetric_matrices import SymmetricMatrices
 from geomstats.test.parametrizers import DataBasedParametrizer
 from geomstats.test.random import RandomDataGenerator
 from geomstats.test_cases.geometry.diffeo import DiffeoTestCase
+from geomstats.test_cases.geometry.fiber_bundle import FiberBundleTestCase
 from geomstats.test_cases.geometry.pullback_metric import PullbackDiffeoMetricTestCase
 from geomstats.test_cases.geometry.riemannian_metric import RiemannianMetricTestCase
 from geomstats.test_cases.geometry.spd_matrices import (
     SPDEuclideanMetricTestCase,
     SPDMatricesTestCase,
+    polar_differential_2,
+    polar_differential_3,
 )
 
 from .data.diffeo import DiffeoTestData
@@ -35,6 +41,7 @@ from .data.spd_matrices import (
     CholeskyMapSmokeTestData,
     LieCholeskyMetricTestData,
     MatrixPower05TestData,
+    PolarDecompositionBundleTestData,
     SPD2AffineMetricTestData,
     SPD2BuresWassersteinMetricTestData,
     SPD2EuclideanMetricTestData,
@@ -304,3 +311,39 @@ class TestLieCholeskyMetric(
     _n = random.randint(2, 5)
     space = SPDMatrices(n=_n, equip=False).equip_with_metric(LieCholeskyMetric)
     testing_data = LieCholeskyMetricTestData()
+
+
+class TestPolarDecompositionBundle(
+    FiberBundleTestCase, metaclass=DataBasedParametrizer
+):
+    _n = random.randint(2, 5)
+    total_space = GeneralLinear(n=_n, equip=True)
+
+    total_space.equip_with_group_action(SpecialOrthogonalComposeAction(_n))
+    total_space.fiber_bundle = PolarDecompositionBundle(total_space)
+    base = SPDMatrices(n=_n, equip=False)
+
+    testing_data = PolarDecompositionBundleTestData()
+
+    @pytest.mark.random
+    def test_tangent_riemmanian_submersion_against_alt(self, n_points, atol):
+        n = self.total_space.n
+        if n > 3:
+            return
+
+        if n == 2:
+            tangent_polar = polar_differential_2
+        else:
+            tangent_polar = polar_differential_3
+
+        base_point = self.data_generator.random_point(n_points)
+        tangent_vec = self.data_generator.random_tangent_vec(base_point)
+
+        quotient_tangent_vec = (
+            self.total_space.fiber_bundle.tangent_riemannian_submersion(
+                tangent_vec, base_point
+            )
+        )
+        quotient_tangent_vec_ = tangent_polar(tangent_vec, base_point)
+
+        self.assertAllClose(quotient_tangent_vec, quotient_tangent_vec_, atol=atol)

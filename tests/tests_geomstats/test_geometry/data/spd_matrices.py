@@ -4,6 +4,7 @@ import geomstats.backend as gs
 from geomstats.test.data import TestData
 
 from .base import VectorSpaceOpenSetTestData
+from .fiber_bundle import FiberBundleTestData
 from .matrices import MatricesMetricTestData
 from .pullback_metric import PullbackDiffeoMetricTestData
 from .riemannian_metric import RiemannianMetricTestData
@@ -504,3 +505,16 @@ class LieCholeskyMetricTestData(PullbackDiffeoMetricTestData):
     fail_for_autodiff_exceptions = False
     fail_for_not_implemented_errors = False
     skip_vec = True
+
+
+class PolarDecompositionBundleTestData(FiberBundleTestData):
+    fail_for_autodiff_exceptions = False
+    fail_for_not_implemented_errors = False
+
+    tolerances = {
+        "log_after_align_is_horizontal": {"atol": 1e-4},
+        "align_vec": {"atol": 1e-2},
+    }
+
+    def tangent_riemmanian_submersion_against_alt_test_data(self):
+        return self.generate_random_data()
