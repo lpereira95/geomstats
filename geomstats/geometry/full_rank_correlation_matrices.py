@@ -14,11 +14,13 @@ import logging
 import geomstats.backend as gs
 from geomstats.algebra_utils import rowwise_scaling
 from geomstats.geometry.base import DiffeomorphicManifold, LevelSet
-from geomstats.geometry.diffeo import ComposedDiffeo, Diffeo
+from geomstats.geometry.diffeo import ComposedDiffeo, Diffeo, ReversedDiffeo
 from geomstats.geometry.fiber_bundle import DistanceMinimizingAligner, FiberBundle
 from geomstats.geometry.general_linear import GeneralLinear
+from geomstats.geometry.group_action import SpecialOrthogonalComposeAction
 from geomstats.geometry.hermitian_matrices import expmh, powermh
 from geomstats.geometry.hyperboloid import Hyperboloid
+from geomstats.geometry.hypersphere import Hypersphere
 from geomstats.geometry.lower_triangular_matrices import StrictlyLowerTriangularMatrices
 from geomstats.geometry.manifold import register_quotient
 from geomstats.geometry.matrices import (
@@ -27,6 +29,7 @@ from geomstats.geometry.matrices import (
     matrix_matrix_transpose,
     tangent_matrix_matrix_transpose,
 )
+from geomstats.geometry.nfold_manifold import NFoldManifold
 from geomstats.geometry.open_hemisphere import (
     OpenHemispheresProduct,
     OpenHemisphereToHyperboloidDiffeo,
@@ -40,6 +43,7 @@ from geomstats.geometry.pullback_metric import PullbackDiffeoMetric
 from geomstats.geometry.quotient_metric import QuotientMetric
 from geomstats.geometry.spd_matrices import (
     CholeskyMap,
+    PolarDecompositionBundle,
     SPDAffineMetric,
     SPDMatrices,
     SymMatrixLog,
@@ -117,6 +121,8 @@ class FullRankCorrelationMatrices(LevelSet):
     ----------
     n : int
         Integer representing the shape of the matrices: n x n.
+    equip : bool
+        If True, equip space with default metric.
     """
 
     def __init__(self, n, equip=True):
@@ -1353,19 +1359,36 @@ register_quotient(
 
 
 class MatrixMatrixTransposeDiffeo(Diffeo):
-    # TODO: uppdate all docstrings
+    r"""Matrix-matrix transpose diffeomorphism.
+
+    A diffeomorphism between quotient polyspheres and
+    full-rank correlation matrices Cor+:
+
+    .. math::
+
+        \Phi(X) = X X^\top
+
+    References
+    ----------
+    .. [BPP2024] Olivier Bisson, Luis F. Pereira, Xavier Pennec.
+        Unpublished. To appear soon.
+    """
 
     def __call__(self, base_point):
-        """Diffeomorphism at base point.
+        r"""Diffeomorphism at base point.
+
+        .. math::
+
+            \Phi(X) = X X^\top
 
         Parameters
         ----------
-        base_point : array-like, shape=[..., *space_shape]
+        base_point : array-like, shape=[..., n, n]
             Base point.
 
         Returns
         -------
-        image_point : array-like, shape=[..., *image_shape]
+        image_point : array-like, shape=[..., n, n]
             Image point.
         """
         return Matrices.mul(base_point, Matrices.transpose(base_point))
@@ -1373,16 +1396,18 @@ class MatrixMatrixTransposeDiffeo(Diffeo):
     def inverse(self, image_point):
         r"""Inverse diffeomorphism at image point.
 
-        :math:`f^{-1}: N \rightarrow M`
+        .. math::
+
+            \Phi^{-1}(C) = C^{1\2}
 
         Parameters
         ----------
-        image_point : array-like, shape=[..., *image_shape]
+        image_point : array-like, shape=[..., n, n]
             Image point.
 
         Returns
         -------
-        base_point : array-like, shape=[..., *space_shape]
+        base_point : array-like, shape=[..., n, n]
             Base point.
         """
         return powermh(image_point, 1 / 2)
@@ -1390,20 +1415,22 @@ class MatrixMatrixTransposeDiffeo(Diffeo):
     def tangent(self, tangent_vec, base_point=None, image_point=None):
         r"""Tangent diffeomorphism at base point.
 
-        df_p is a linear map from T_pM to T_f(p)N.
+        .. math:
+
+            d_X \Phi(V) = V X^\top + X V^top
 
         Parameters
         ----------
-        tangent_vec : array-like, shape=[..., *space_shape]
+        tangent_vec : array-like, shape=[..., n, n]
             Tangent vector at base point.
-        base_point : array-like, shape=[..., *space_shape]
+        base_point : array-like, shape=[..., n, n]
             Base point.
-        image_point : array-like, shape=[..., *image_shape]
+        image_point : array-like, shape=[..., n, n]
             Image point.
 
         Returns
         -------
-        image_tangent_vec : array-like, shape=[..., *image_shape]
+        image_tangent_vec : array-like, shape=[..., n, n]
             Image tangent vector at image of the base point.
         """
         if base_point is None:
@@ -1416,25 +1443,26 @@ class MatrixMatrixTransposeDiffeo(Diffeo):
     def inverse_tangent(self, image_tangent_vec, image_point=None, base_point=None):
         r"""Inverse tangent diffeomorphism at image point.
 
-        df^-1_p is a linear map from T_f(p)N to T_pM
-
         .. math::
 
-            d_X \pi(V) = T_{Q^{1/2}}^{-1}(V)
+            d_C \pi(W) = T_{C^{1/2}}^{-1}(W)
 
+        where :math:`T_E^{-1}(Z)` denotes
+        the unique solution :math:`A` to the Sylvester equation
+        :math:`E A + A E = Z`.
 
         Parameters
         ----------
-        image_tangent_vec : array-like, shape=[..., *image_shape]
+        image_tangent_vec : array-like, shape=[..., n, n]
             Image tangent vector at image point.
-        image_point : array-like, shape=[..., *image_shape]
+        image_point : array-like, shape=[..., n, n]
             Image point.
-        base_point : array-like, shape=[..., *space_shape]
+        base_point : array-like, shape=[..., n, n]
             Base point.
 
         Returns
         -------
-        tangent_vec : array-like, shape=[..., *space_shape]
+        tangent_vec : array-like, shape=[..., n, n]
             Tangent vector at base point.
         """
         if base_point is None:
@@ -1444,7 +1472,28 @@ class MatrixMatrixTransposeDiffeo(Diffeo):
 
 
 class QuotientPolySpheres(DiffeomorphicManifold):
-    def __init__(self, n=None, diffeo=None, image_space=None):
+    """Quotient polyspheres.
+
+    A quotient space of a product of hyperspheres by the orthogonal group.
+
+    Parameters
+    ----------
+    n : int
+        Integer representing the shape of the matrices: n x n.
+    diffeo : Diffeo
+        The diffeomorphism defining the manifold.
+    image_space: Manifold
+        The image space of the diffeomorphism defining the manifold.
+    equip : bool
+        Whether to equip the space with default metric.
+
+    References
+    ----------
+    .. [BPP2024] Olivier Bisson, Luis F. Pereira, Xavier Pennec.
+        Unpublished. To appear soon.
+    """
+
+    def __init__(self, n=None, diffeo=None, image_space=None, equip=True):
         if n is None and image_space is None:
             raise ValueError("Need to define `n` or `image_space`.")
 
@@ -1459,5 +1508,50 @@ class QuotientPolySpheres(DiffeomorphicManifold):
             image_space,
             dim=image_space.dim,
             shape=image_space.shape,
-            equip=False,
+            equip=equip,
+        )
+
+    def default_metric(self):
+        """Metric to equip the space with if equip is True."""
+        n = self.image_space.n
+
+        sphere = Hypersphere(dim=n - 1)
+
+        total_space = NFoldManifold(sphere, n_copies=n)
+        total_space.equip_with_group_action(
+            SpecialOrthogonalComposeAction(total_space.n_copies)
+        )
+        total_space.fiber_bundle = PolarDecompositionBundle(total_space)
+
+        return QuotientMetric, dict(total_space=total_space)
+
+
+class SphericalProductMetric(PullbackDiffeoMetric):
+    """Spherical product metric on Cor+.
+
+    Parameters
+    ----------
+    space : FullRankCorrelationMatrices
+        Space to equip with metric.
+    diffeo : Diffeo
+        The diffeomorphism that pullbacks the metric.
+    image_space: Manifold
+        The image space of the diffeomorphism whose metric is pulled back.
+    equip : bool
+        Whether to equip the space with default metric.
+
+    References
+    ----------
+    .. [BPP2024] Olivier Bisson, Luis F. Pereira, Xavier Pennec.
+        Unpublished. To appear soon.
+    """
+
+    def __init__(self, space, diffeo=None, image_space=None):
+        if image_space is None:
+            image_space = QuotientPolySpheres(space.n, diffeo=diffeo, image_space=space)
+
+        super().__init__(
+            space=space,
+            diffeo=ReversedDiffeo(image_space.diffeo),
+            image_space=image_space,
         )

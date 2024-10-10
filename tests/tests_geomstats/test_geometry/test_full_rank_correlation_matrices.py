@@ -12,10 +12,13 @@ from geomstats.geometry.full_rank_correlation_matrices import (
     LogEuclideanCholeskyMetric,
     LogScaledMetric,
     LogScalingDiffeo,
+    MatrixMatrixTransposeDiffeo,
     OffLogDiffeo,
     OffLogMetric,
     PolyHyperbolicCholeskyMetric,
+    QuotientPolySpheres,
     SPDScalingFinder,
+    SphericalProductMetric,
     UniqueDiagonalMatrixAlgorithm,
 )
 from geomstats.geometry.general_linear import GeneralLinear
@@ -59,7 +62,9 @@ from .data.full_rank_correlation_matrices import (
     LogScaledMetricTestData,
     OffLogMetricTestData,
     PolyHyperbolicCholeskyMetricTestData,
+    QuotientPolySpheresMetricTestData,
     SPDScalingFinderTestData,
+    SphericalProductMetricTestData,
     UniqueDiagonalMatrixAlgorithmTestData,
 )
 
@@ -336,3 +341,33 @@ class TestLogScaledMetric(
     PullbackDiffeoMetricTestCase, metaclass=DataBasedParametrizer
 ):
     testing_data = LogScaledMetricTestData()
+
+
+class TestMatrixMatrixTransposeDiffeo(DiffeoTestCase, metaclass=DataBasedParametrizer):
+    _n = random.randint(2, 5)
+
+    diffeo = MatrixMatrixTransposeDiffeo()
+    image_space = FullRankCorrelationMatrices(n=_n, equip=False)
+    space = QuotientPolySpheres(diffeo=diffeo, image_space=image_space)
+
+    testing_data = DiffeoTestData()
+
+
+class TestQuotientPolySpheresMetric(
+    QuotientMetricTestCase, metaclass=DataBasedParametrizer
+):
+    _n = random.randint(3, 5)
+    space = QuotientPolySpheres(n=_n)
+    testing_data = QuotientPolySpheresMetricTestData()
+
+
+@pytest.mark.redundant
+class TestSphericalProductMetric(
+    PullbackDiffeoMetricTestCase, metaclass=DataBasedParametrizer
+):
+    _n = random.randint(2, 5)
+
+    space = FullRankCorrelationMatrices(n=_n, equip=False).equip_with_metric(
+        SphericalProductMetric
+    )
+    testing_data = SphericalProductMetricTestData()

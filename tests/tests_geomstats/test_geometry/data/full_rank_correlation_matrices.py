@@ -77,3 +77,23 @@ class SPDScalingFinderTestData(TestData):
 class LogScaledMetricTestData(PullbackDiffeoMetricTestData):
     fail_for_autodiff_exceptions = False
     fail_for_not_implemented_errors = False
+
+
+class QuotientPolySpheresMetricTestData(QuotientMetricTestData):
+    fail_for_autodiff_exceptions = False
+    fail_for_not_implemented_errors = False
+
+    tolerances = {
+        "dist_point_to_itself_is_zero": {"atol": 1e-5},
+    }
+    xfails = ("exp_after_log", "log_after_exp")
+
+
+class SphericalProductMetricTestData(PullbackDiffeoMetricTestData):
+    fail_for_autodiff_exceptions = False
+    fail_for_not_implemented_errors = False
+
+    tolerances = {
+        "dist_point_to_itself_is_zero": {"atol": 1e-5},
+    }
+    xfails = ("exp_after_log", "log_after_exp")
